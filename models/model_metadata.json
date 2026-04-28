@@ -1,0 +1,58 @@
+{
+  "label_meta_ref": "Meta/label_meta.json",
+  "audio_cfg": {
+    "sr": 16000,
+    "duration_s": 5.0,
+    "mono": true
+  },
+  "feature_cfg": {
+    "n_mfcc": 40,
+    "n_mels": 128,
+    "hop_length": 512,
+    "n_fft": 2048,
+    "fmax": 8000
+  },
+  "model_files": {
+    "rf_mfcc": "rf_mfcc.joblib",
+    "cnn_melspec": "cnn_melspec.keras",
+    "cnn_mfcc": "cnn_mfcc.keras",
+    "lstm_melspec": "lstm_melspec.keras",
+    "lstm_mfcc": "lstm_mfcc.keras"
+  },
+  "input_shapes": {
+    "cnn_melspec": {
+      "n_mels": 128,
+      "n_frames": 158
+    },
+    "cnn_mfcc": {
+      "n_mfcc": 40,
+      "n_frames": 158
+    },
+    "lstm_melspec": {
+      "n_frames": 158,
+      "n_mels": 128
+    },
+    "lstm_mfcc": {
+      "n_frames": 158,
+      "n_mfcc_coef": 40
+    }
+  },
+  "model_cfgs": {
+    "cnn": {
+      "lr": 0.001,
+      "dropout": 0.3,
+      "filters": [
+        16,
+        32,
+        64
+      ],
+      "kernel_size": 3
+    },
+    "lstm": {
+      "lr": 0.001,
+      "dropout": 0.3,
+      "units_1": 64,
+      "units_2": 32
+    }
+  }
+}
