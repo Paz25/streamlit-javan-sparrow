@@ -715,10 +715,10 @@ def fig_lstm_architecture(input_shape, num_classes):
             boxstyle="round,pad=0.08", fc=CLR_VIOL, ec="none", alpha=alpha
         ))
         ax.text(lx, 1.5,
-                f"BiLSTM\nLayer {'1' if units==64 else '2'}\nunits={units}",
+                f"LSTM\nLayer {'1' if units==64 else '2'}\nunits={units}",
                 ha="center", va="center",
                 fontsize=6.8, color=BG_MAIN, fontfamily="monospace", fontweight="bold")
-        ax.text(lx, 2.7, "←→", ha="center", va="bottom", fontsize=7, color=CLR_AMBR)
+        ax.text(lx, 2.7, "→", ha="center", va="bottom", fontsize=7, color=CLR_AMBR)
     ax.annotate("", xy=(3.25, 1.5), xytext=(1.92, 1.5),
                 arrowprops=dict(arrowstyle="-|>", color=CLR_MUTE, lw=0.9))
     ax.annotate("", xy=(5.45, 1.5), xytext=(4.35, 1.5),
@@ -739,7 +739,7 @@ def fig_lstm_architecture(input_shape, num_classes):
             fontsize=6.5, color=BG_MAIN, fontfamily="monospace", fontweight="bold")
     ax.annotate("", xy=(8.9, 1.5), xytext=(8.5, 1.5),
                 arrowprops=dict(arrowstyle="-|>", color=CLR_MUTE, lw=0.9))
-    ax.set_title("Arsitektur BiLSTM — Klasifikasi Sekuens Temporal",
+    ax.set_title("Arsitektur LSTM — Klasifikasi Sekuens Temporal",
                  fontsize=9, color=CLR_TEXT, fontweight="bold", pad=6)
     fig.tight_layout()
     return fig
@@ -1107,9 +1107,10 @@ def run_interactive_pipeline(y_raw, variant_name, arch, feature, model_obj, labe
                 else f"({ish.get('n_frames','T')}, {ish.get('n_mfcc_coef',N_MFCC)})")
         st.pyplot(fig_lstm_architecture(sstr, num_classes))
         st.caption(
-            "BiLSTM memproses sekuens temporal dari kiri ke kanan dan kanan ke kiri "
-            "secara bersamaan, sehingga mampu menangkap dependensi temporal jangka panjang "
-            "dalam sinyal ucapan."
+            "LSTM dua-lapis (stacked) memproses sekuens temporal secara berurutan, "
+            "dengan lapisan pertama mengembalikan seluruh sekuens hidden state sebagai "
+            "masukan bagi lapisan kedua, sehingga mampu menangkap dependensi temporal "
+            "hierarkis pada sinyal vokalisasi."
         )
     plt.close("all")
     ph_arch.success("✅ **Ilustrasi arsitektur ditampilkan.**")
@@ -1196,7 +1197,7 @@ def main():
 
         arch_choice = st.radio(
             "Arsitektur",
-            options=["Random Forest", "CNN", "BiLSTM"],
+            options=["Random Forest", "CNN", "LSTM"],
             index=0,
             help="Pilih arsitektur model yang akan digunakan.",
         )
@@ -1226,8 +1227,8 @@ def main():
             "RF + MFCC":      "Ensemble 500 decision trees · vektor MFCC 40d",
             "CNN + MelSpec":  "3-blok Conv2D · Mel-Spectrogram 2D",
             "CNN + MFCC":     "3-blok Conv2D · matriks MFCC 2D",
-            "LSTM + MelSpec": "2-layer BiLSTM · sekuens dari Mel-Spectrogram",
-            "LSTM + MFCC":    "2-layer BiLSTM · sekuens dari matriks MFCC",
+            "LSTM + MelSpec": "2-layer LSTM stacked · sekuens dari Mel-Spectrogram",
+            "LSTM + MFCC":    "2-layer LSTM stacked · sekuens dari matriks MFCC",
         }
         st.caption(arch_desc[variant_name])
         st.markdown("---")
