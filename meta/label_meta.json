@@ -1,15 +1,15 @@
 {
   "classes": [
-    "calls & songs",
-    "other"
+    "Javan Sparrow",
+    "Others"
   ],
   "label2id": {
-    "calls & songs": 0,
-    "other": 1
+    "Javan Sparrow": 0,
+    "Others": 1
   },
   "id2label": {
-    "0": "calls & songs",
-    "1": "other"
+    "0": "Javan Sparrow",
+    "1": "Others"
   },
   "num_classes": 2
 }

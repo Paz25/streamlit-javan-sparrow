@@ -12,6 +12,10 @@
     "n_fft": 2048,
     "fmax": 8000
   },
+  "split_cfg": {
+    "test_size": 0.15,
+    "val_size_within_trainval": 0.176
+  },
   "model_files": {
     "rf_mfcc": "rf_mfcc.joblib",
     "cnn_melspec": "cnn_melspec.keras",
@@ -38,6 +42,16 @@
     }
   },
   "model_cfgs": {
+    "rf": {
+      "n_estimators": 500,
+      "max_depth": null,
+      "min_samples_split": 2,
+      "min_samples_leaf": 1,
+      "max_features": "sqrt",
+      "class_weight": "balanced",
+      "random_state": 42,
+      "n_jobs": -1
+    },
     "cnn": {
       "lr": 0.001,
       "dropout": 0.3,
@@ -54,5 +68,14 @@
       "units_1": 64,
       "units_2": 32
     }
+  },
+  "training_cfg": {
+    "batch_size": 32,
+    "max_epochs": 100,
+    "early_stopping_patience": 8,
+    "reduce_lr_factor": 0.5,
+    "reduce_lr_patience": 3,
+    "reduce_lr_min": 1e-06,
+    "cv_n_splits": 5
   }
 }
