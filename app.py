@@ -36,7 +36,6 @@ import soundfile as sf
 import streamlit as st
 from matplotlib.colors import LinearSegmentedColormap
 from pydub import AudioSegment
-
 matplotlib.use("Agg")
 
 
@@ -50,6 +49,11 @@ MODEL_DIR = Path("./models")
 # ===========================================================================
 # [DEV] KONSTANTA FITUR
 # ===========================================================================
+# Nilai default. Pada saat aplikasi dijalankan, nilai-nilai ini ditimpa
+# oleh model_metadata.json (di-load oleh load_all_models) agar identik
+# dengan konfigurasi yang digunakan pada tahap pelatihan. Default di sini
+# berfungsi sebagai fallback dan memungkinkan modul ini di-import tanpa
+# error sebelum metadata tersedia.
 
 AUDIO_SR       = 16000
 AUDIO_DURATION = 5.0
@@ -59,6 +63,31 @@ HOP_LENGTH     = 512
 N_FFT          = 2048
 FMAX           = 8000
 AUDIO_EXTS     = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".webm")
+
+
+def _apply_metadata_to_globals(metadata: dict) -> None:
+    """
+    Sinkronkan konstanta pipeline dengan model_metadata.json.
+
+    Dipanggil sekali pada saat load_all_models() selesai memuat metadata.
+    Memastikan AUDIO_SR, AUDIO_DURATION, N_MFCC, N_MELS, HOP_LENGTH,
+    N_FFT, dan FMAX ekuivalen dengan AudioCfg dan FeatureCfg pada tahap
+    pelatihan, sehingga pipeline preprocessing dan ekstraksi fitur pada
+    inferensi identik dengan pelatihan.
+    """
+    global AUDIO_SR, AUDIO_DURATION
+    global N_MFCC, N_MELS, HOP_LENGTH, N_FFT, FMAX
+
+    audio_cfg   = metadata.get("audio_cfg",   {})
+    feature_cfg = metadata.get("feature_cfg", {})
+
+    AUDIO_SR       = int(audio_cfg.get("sr",            AUDIO_SR))
+    AUDIO_DURATION = float(audio_cfg.get("duration_s",  AUDIO_DURATION))
+    N_MFCC         = int(feature_cfg.get("n_mfcc",      N_MFCC))
+    N_MELS         = int(feature_cfg.get("n_mels",      N_MELS))
+    HOP_LENGTH     = int(feature_cfg.get("hop_length",  HOP_LENGTH))
+    N_FFT          = int(feature_cfg.get("n_fft",       N_FFT))
+    FMAX           = int(feature_cfg.get("fmax",        FMAX))
 
 
 # ===========================================================================
@@ -441,6 +470,10 @@ def load_all_models(model_dir: Path):
 
     with open(meta_path) as f:
         metadata = json.load(f)
+
+    # Sinkronkan konstanta global dengan konfigurasi pelatihan sebelum
+    # pipeline preprocessing/ekstraksi fitur dipanggil pada inferensi.
+    _apply_metadata_to_globals(metadata)
 
     label_meta = None
     if label_meta_path.exists():
