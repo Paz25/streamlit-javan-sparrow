@@ -518,19 +518,38 @@ def load_all_models(model_dir: Path):
 # ===========================================================================
 
 def load_audio_bytes(audio_bytes: bytes, ext: str = ".wav") -> np.ndarray:
-    """Konversi bytes audio ke array numpy float32 16 kHz mono."""
+    """Konversi bytes audio menjadi array float32, 16 kHz, mono.
+
+    Strategi berlapis demi reproduktibilitas dan minim dependensi eksternal:
+      1. Jalur utama  : librosa/soundfile langsung (tanpa ffmpeg) — identik
+                        dengan loader yang digunakan pada tahap pelatihan.
+      2. Jalur cadangan: pydub + ffmpeg, hanya untuk format terkompresi
+                        (mis. .m4a) yang tidak didukung libsndfile.
+    """
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
+
     try:
-        audio = AudioSegment.from_file(tmp_path)
-        audio = audio.set_frame_rate(AUDIO_SR).set_channels(1)
-        wav_io = io.BytesIO()
-        audio.export(wav_io, format="wav")
-        wav_io.seek(0)
-        y, _ = librosa.load(wav_io, sr=AUDIO_SR, mono=True)
+        # Jalur utama: setara loader pelatihan; resample & mono ditangani librosa.
+        y, _ = librosa.load(tmp_path, sr=AUDIO_SR, mono=True)
+    except Exception:
+        # Jalur cadangan: butuh ffmpeg/ffprobe.
+        try:
+            audio = AudioSegment.from_file(tmp_path)
+            audio = audio.set_frame_rate(AUDIO_SR).set_channels(1)
+            wav_io = io.BytesIO()
+            audio.export(wav_io, format="wav")
+            wav_io.seek(0)
+            y, _ = librosa.load(wav_io, sr=AUDIO_SR, mono=True)
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Gagal mendekode audio: ffmpeg/ffprobe tidak ditemukan. "
+                "Pasang ffmpeg, atau unggah berkas berformat WAV/FLAC/OGG."
+            ) from exc
     finally:
         os.unlink(tmp_path)
+
     return y.astype(np.float32)
 
 
