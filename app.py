@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 app.py — Streamlit Deployment: Audio Speech Classification
 ============================================================
@@ -14,10 +13,8 @@ Input  : upload file audio (wav/mp3/flac/ogg/m4a) atau rekaman langsung
 Output : prediksi kelas + confidence score + visualisasi pipeline interaktif
 """
 
-import io
 import json
 import os
-import re
 import tempfile
 import time
 from pathlib import Path
@@ -42,19 +39,11 @@ matplotlib.use("Agg")
 # ===========================================================================
 # [DEV] KONFIGURASI PATH MODEL
 # ===========================================================================
-
 MODEL_DIR = Path("./models")
-
 
 # ===========================================================================
 # [DEV] KONSTANTA FITUR
 # ===========================================================================
-# Nilai default. Pada saat aplikasi dijalankan, nilai-nilai ini ditimpa
-# oleh model_metadata.json (di-load oleh load_all_models) agar identik
-# dengan konfigurasi yang digunakan pada tahap pelatihan. Default di sini
-# berfungsi sebagai fallback dan memungkinkan modul ini di-import tanpa
-# error sebelum metadata tersedia.
-
 AUDIO_SR       = 16000
 AUDIO_DURATION = 5.0
 N_MFCC         = 40
@@ -63,7 +52,8 @@ HOP_LENGTH     = 512
 N_FFT          = 2048
 FMAX           = 8000
 AUDIO_EXTS     = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".webm")
-
+TARGET_DBFS      = -20.0
+NOISE_PROFILE_S  = 0.5 
 
 def _apply_metadata_to_globals(metadata: dict) -> None:
     """
@@ -93,7 +83,6 @@ def _apply_metadata_to_globals(metadata: dict) -> None:
 # ===========================================================================
 # [DEV] REGISTRI VARIAN MODEL
 # ===========================================================================
-
 VARIANT_OPTIONS = {
     "RF + MFCC":      {"model_key": "rf_mfcc",     "arch": "rf",   "feature": "mfcc"},
     "CNN + MelSpec":  {"model_key": "cnn_melspec",  "arch": "cnn",  "feature": "melspec"},
@@ -106,7 +95,6 @@ VARIANT_OPTIONS = {
 # ===========================================================================
 # [DEV] PALET WARNA TEMA
 # ===========================================================================
-
 BG_MAIN  = "#0b0f1a"
 BG_CARD  = "#111827"
 CLR_CYAN = "#00e5cc"
@@ -124,14 +112,12 @@ CMAP_SPEC = LinearSegmentedColormap.from_list(
 # ===========================================================================
 # KONFIGURASI HALAMAN STREAMLIT
 # ===========================================================================
-
 st.set_page_config(
     page_title="Javan Sparrow Audio Classifier",
     page_icon="🎙️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
 
 # ===========================================================================
 # [DEV] CSS KUSTOM
@@ -471,8 +457,6 @@ def load_all_models(model_dir: Path):
     with open(meta_path) as f:
         metadata = json.load(f)
 
-    # Sinkronkan konstanta global dengan konfigurasi pelatihan sebelum
-    # pipeline preprocessing/ekstraksi fitur dipanggil pada inferensi.
     _apply_metadata_to_globals(metadata)
 
     label_meta = None
@@ -513,79 +497,163 @@ def load_all_models(model_dir: Path):
     return loaded
 
 
-# ===========================================================================
-# PREPROCESSING
-# ===========================================================================
+class PreprocessingError(RuntimeError):
+    """Kesalahan yang terjadi pada salah satu tahap preprocessing."""
 
-def load_audio_bytes(audio_bytes: bytes, ext: str = ".wav") -> np.ndarray:
-    """Konversi bytes audio menjadi array float32, 16 kHz, mono.
 
-    Strategi berlapis demi reproduktibilitas dan minim dependensi eksternal:
-      1. Jalur utama  : librosa/soundfile langsung (tanpa ffmpeg) — identik
-                        dengan loader yang digunakan pada tahap pelatihan.
-      2. Jalur cadangan: pydub + ffmpeg, hanya untuk format terkompresi
-                        (mis. .m4a) yang tidak didukung libsndfile.
+def _stage1_convert(src_path: Path, dst_path: Path) -> None:
+    """Tahap 1 — konversi ke WAV mono pada laju pencuplikan target.
+
+    Ekuivalen dengan `convert_to_wav()` pada tahap pelatihan. Resampling
+    dilakukan oleh pydub, bukan librosa, karena kedua pustaka menggunakan
+    algoritma interpolasi yang berbeda dan menghasilkan sinyal yang tidak
+    identik pada pita frekuensi tinggi.
     """
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
-
     try:
-        # Jalur utama: setara loader pelatihan; resample & mono ditangani librosa.
-        y, _ = librosa.load(tmp_path, sr=AUDIO_SR, mono=True)
-    except Exception:
-        # Jalur cadangan: butuh ffmpeg/ffprobe.
-        try:
-            audio = AudioSegment.from_file(tmp_path)
-            audio = audio.set_frame_rate(AUDIO_SR).set_channels(1)
-            wav_io = io.BytesIO()
-            audio.export(wav_io, format="wav")
-            wav_io.seek(0)
-            y, _ = librosa.load(wav_io, sr=AUDIO_SR, mono=True)
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                "Gagal mendekode audio: ffmpeg/ffprobe tidak ditemukan. "
-                "Pasang ffmpeg, atau unggah berkas berformat WAV/FLAC/OGG."
-            ) from exc
-    finally:
-        os.unlink(tmp_path)
+        audio = AudioSegment.from_file(str(src_path))
+    except FileNotFoundError as exc:
+        raise PreprocessingError(
+            "Gagal mendekode audio: ffmpeg/ffprobe tidak ditemukan. "
+            "Berkas berformat WAV dapat diproses tanpa ffmpeg; untuk MP3, "
+            "M4A, dan OGG, ffmpeg wajib tersedia."
+        ) from exc
+    except Exception as exc:
+        raise PreprocessingError(
+            f"Berkas audio tidak dapat didekode ({exc}). Pastikan berkas "
+            "tidak rusak dan berformat WAV, MP3, FLAC, OGG, atau M4A."
+        ) from exc
+    audio = audio.set_frame_rate(AUDIO_SR).set_channels(1)
+    audio.export(str(dst_path), format="wav")
 
+
+def _stage2_reduce_noise(src_path: Path, dst_path: Path) -> None:
+    """Tahap 2 — reduksi derau spektral berbasis profil awal sinyal.
+
+    Ekuivalen dengan `reduce_noise()` pada tahap pelatihan. Pemuatan
+    menggunakan `sr=None` agar tidak terjadi resampling ulang, dan
+    penulisan menggunakan subtipe bawaan soundfile (PCM 16-bit).
+    """
+    y, sr = librosa.load(src_path, sr=None)
+    noise_clip = y[: int(NOISE_PROFILE_S * sr)]
+    y_reduced  = nr.reduce_noise(y=y, sr=sr, y_noise=noise_clip)
+    sf.write(dst_path, y_reduced, sr)
+
+
+def _stage3_normalize_volume(src_path: Path, dst_path: Path) -> None:
+    """Tahap 3 — normalisasi RMS sinyal ke TARGET_DBFS.
+
+    Ekuivalen dengan `normalize_volume()` pada tahap pelatihan.
+    """
+    y, sr = librosa.load(src_path, sr=None)
+    rms          = np.sqrt(np.mean(y ** 2))
+    current_dBFS = 20 * np.log10(rms) if rms > 0 else -np.inf
+    scaling      = 10 ** ((TARGET_DBFS - current_dBFS) / 20)
+    y_normalized = np.clip(y * scaling, -1.0, 1.0)
+    sf.write(dst_path, y_normalized, sr)
+
+
+def _stage4_normalize_duration(src_path: Path, dst_path: Path) -> None:
+    """Tahap 4 — penyeragaman durasi melalui pemangkasan atau silence padding.
+
+    Ekuivalen dengan `normalize_duration()` pada tahap pelatihan.
+    """
+    audio     = AudioSegment.from_file(src_path)
+    audio     = audio.set_frame_rate(AUDIO_SR).set_channels(1)
+    target_ms = int(AUDIO_DURATION * 1000)
+    if len(audio) < target_ms:
+        audio = audio + AudioSegment.silent(duration=target_ms - len(audio))
+    else:
+        audio = audio[:target_ms]
+    audio.export(dst_path, format="wav")
+
+
+def _load_fixed_length(path: Path) -> np.ndarray:
+    """Pemuatan akhir dengan pemaksaan panjang sinyal.
+
+    Ekuivalen dengan `load_fixed_length()` pada tahap pelatihan; menjamin
+    panjang sinyal tepat AUDIO_SR × AUDIO_DURATION sampel sebelum
+    ekstraksi fitur.
+    """
+    y, _       = librosa.load(path, sr=AUDIO_SR, mono=True)
+    target_len = int(AUDIO_SR * AUDIO_DURATION)
+    y = (
+        np.pad(y, (0, target_len - len(y)))
+        if len(y) < target_len
+        else y[:target_len]
+    )
     return y.astype(np.float32)
 
 
-def preprocess_audio(y: np.ndarray) -> dict:
-    """Pipeline preprocessing — mengembalikan sinyal per tahap untuk visualisasi."""
-    stages = {"raw": y.copy()}
+def preprocess_from_bytes(audio_bytes: bytes, ext: str = ".wav") -> dict:
+    """Jalankan seluruh pipeline preprocessing dari bytes audio.
 
-    noise_clip = y[:int(0.5 * AUDIO_SR)]
-    y_denoised = nr.reduce_noise(y=y, sr=AUDIO_SR, y_noise=noise_clip)
-    stages["denoised"] = y_denoised.copy()
+    Mengembalikan dict berisi sinyal pada setiap tahap:
+        raw      — setelah konversi (tahap 1), sebagai titik masuk pipeline
+        denoised — setelah reduksi derau (tahap 2)
+        normloud — setelah normalisasi volume (tahap 3)
+        fixedlen — setelah normalisasi durasi dan pemaksaan panjang (tahap 4)
 
-    rms          = np.sqrt(np.mean(y_denoised ** 2))
-    current_dBFS = 20 * np.log10(rms) if rms > 0 else -np.inf
-    scale        = 10 ** ((-20.0 - current_dBFS) / 20)
-    y_normloud   = np.clip(y_denoised * scale, -1.0, 1.0).astype(np.float32)
-    stages["normloud"] = y_normloud.copy()
+    Sinyal tiap tahap dibaca kembali dari berkas, sehingga yang
+    divisualisasikan adalah sinyal terkuantisasi yang sesungguhnya
+    dikonsumsi oleh tahap berikutnya.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        d   = Path(tmp_dir)
+        p_src = d / f"source{ext}"
+        p1, p2, p3, p4 = d / "s1.wav", d / "s2.wav", d / "s3.wav", d / "s4.wav"
+        p_src.write_bytes(audio_bytes)
 
-    target_len = int(AUDIO_SR * AUDIO_DURATION)
-    y_fixed    = (
-        np.pad(y_normloud, (0, target_len - len(y_normloud)))
-        if len(y_normloud) < target_len
-        else y_normloud[:target_len]
-    )
-    stages["fixedlen"] = y_fixed.astype(np.float32)
+        try:
+            _stage1_convert(p_src, p1)
+            raw, _ = librosa.load(p1, sr=None)
 
-    return stages
+            if len(raw) < int(AUDIO_SR * NOISE_PROFILE_S):
+                raise PreprocessingError(
+                    f"Durasi audio kurang dari {NOISE_PROFILE_S:.1f} detik, "
+                    "sehingga profil derau tidak dapat diekstraksi."
+                )
 
+            _stage2_reduce_noise(p1, p2)
+            denoised, _ = librosa.load(p2, sr=None)
+
+            _stage3_normalize_volume(p2, p3)
+            normloud, _ = librosa.load(p3, sr=None)
+
+            _stage4_normalize_duration(p3, p4)
+            fixedlen = _load_fixed_length(p4)
+
+        except PreprocessingError:
+            raise
+        except Exception as exc:
+            raise PreprocessingError(f"Preprocessing gagal: {exc}") from exc
+
+    return {
+        "raw":      raw.astype(np.float32),
+        "denoised": denoised.astype(np.float32),
+        "normloud": normloud.astype(np.float32),
+        "fixedlen": fixedlen,
+    }
+
+# ===========================================================================
+# EKSTRAKSI FITUR
+# ===========================================================================
 
 def extract_all_features(y: np.ndarray) -> dict:
-    """Ekstrak vektor MFCC, matriks MFCC, dan Mel-spectrogram."""
+    """Ekstrak vektor MFCC, matriks MFCC, dan Mel-spectrogram.
+
+    Ekuivalen dengan `extract_features()` pada tahap pelatihan. Jumlah frame
+    disamakan melalui `max_frames`, dan vektor MFCC untuk Random Forest
+    dihitung sebagai rata-rata sepanjang sumbu waktu sebelum padding
+    diterapkan, sesuai urutan operasi pada tahap pelatihan.
+    """
     max_frames = int(np.ceil(int(AUDIO_SR * AUDIO_DURATION) / HOP_LENGTH)) + 1
 
-    def _pad_or_trim(M, target):
+    def _pad_or_trim(M: np.ndarray, target: int) -> np.ndarray:
         cur = M.shape[1]
-        if cur > target:   return M[:, :target]
-        elif cur < target: return np.pad(M, ((0, 0), (0, target - cur)), mode="constant")
+        if cur > target:
+            return M[:, :target]
+        elif cur < target:
+            return np.pad(M, ((0, 0), (0, target - cur)), mode="constant")
         return M
 
     mfcc_mat = librosa.feature.mfcc(
@@ -594,7 +662,7 @@ def extract_all_features(y: np.ndarray) -> dict:
     mfcc_vec = mfcc_mat.mean(axis=1).astype(np.float32)
     mfcc_mat = _pad_or_trim(mfcc_mat, max_frames)
 
-    S    = librosa.feature.melspectrogram(
+    S = librosa.feature.melspectrogram(
         y=y, sr=AUDIO_SR, n_mels=N_MELS, n_fft=N_FFT,
         hop_length=HOP_LENGTH, fmax=FMAX, power=2.0,
     )
@@ -602,7 +670,6 @@ def extract_all_features(y: np.ndarray) -> dict:
     S_db = _pad_or_trim(S_db, max_frames)
 
     return {"mfcc_vec": mfcc_vec, "mfcc_mat": mfcc_mat, "melspec": S_db}
-
 
 # ===========================================================================
 # INFERENSI
@@ -992,7 +1059,8 @@ def render_audio_input() -> tuple[bytes | None, str]:
 # PIPELINE INTERAKTIF (5 STEP)
 # ===========================================================================
 
-def run_interactive_pipeline(y_raw, variant_name, arch, feature, model_obj, label_meta, metadata):
+def run_interactive_pipeline(audio_bytes, audio_ext, variant_name, arch,
+                             feature, model_obj, label_meta, metadata):
     """
     Jalankan pipeline analisis secara animatif step-by-step:
       Step 1 — Waveform audio mentah
@@ -1021,10 +1089,15 @@ def run_interactive_pipeline(y_raw, variant_name, arch, feature, model_obj, labe
         '</div>', unsafe_allow_html=True,
     )
     ph_wf = st.empty()
-    prog.progress(10, text="Membaca sinyal audio...")
-    time.sleep(0.4)
+    prog.progress(10, text="Mengonversi sinyal audio...")
+    stages = preprocess_from_bytes(audio_bytes, ext=audio_ext)
+    y_raw  = stages["raw"]
     ph_wf.pyplot(fig_waveform(y_raw, "Waveform — Audio Asli", CLR_CYAN))
     plt.close("all")
+    st.caption(
+        f"Sinyal dikonversi ke kanal tunggal pada {AUDIO_SR/1000:.0f} kHz "
+        "sebagai titik masuk pipeline, identik dengan tahap pelatihan."
+    )
 
     # STEP 2
     st.markdown(
@@ -1039,7 +1112,6 @@ def run_interactive_pipeline(y_raw, variant_name, arch, feature, model_obj, labe
     prog.progress(22, text="Melakukan noise reduction...")
     ph_prep.info("🔇 **Noise Reduction** — Memfilter derau latar belakang...")
     time.sleep(0.5)
-    stages = preprocess_audio(y_raw)
 
     with col_p1:
         st.pyplot(fig_waveform(stages["denoised"], "Setelah Noise Reduction", CLR_VIOL))
@@ -1062,7 +1134,11 @@ def run_interactive_pipeline(y_raw, variant_name, arch, feature, model_obj, labe
     with col_p3:
         st.pyplot(fig_waveform(stages["fixedlen"], "Setelah Normalisasi Durasi", CLR_CYAN))
         plt.close("all")
-        st.caption("Audio dipangkas jika >5 detik, atau diberi silence padding jika <5 detik.")
+        st.caption(
+            "Audio dipangkas jika >5 detik, atau diberi silence padding jika "
+            "<5 detik. Setiap tahap disimpan sebagai WAV PCM 16-bit, sesuai "
+            "pipeline pelatihan."
+        )
 
     ph_prep.success("✅ **Preprocessing selesai** — Audio siap untuk ekstraksi fitur.")
     y_clean = stages["fixedlen"]
@@ -1354,14 +1430,9 @@ def main():
     # EKSEKUSI PIPELINE
     if classify_btn and audio_bytes:
         try:
-            with st.spinner("Menguraikan sinyal audio..."):
-                y_raw = load_audio_bytes(audio_bytes, ext=audio_ext)
-                if len(y_raw) < int(AUDIO_SR * 0.5):
-                    st.error("⚠️ Audio terlalu pendek (minimum 0,5 detik). Coba rekam ulang.")
-                    st.stop()
-
             run_interactive_pipeline(
-                y_raw        = y_raw,
+                audio_bytes  = audio_bytes,
+                audio_ext    = audio_ext,
                 variant_name = variant_name,
                 arch         = cfg["arch"],
                 feature      = cfg["feature"],
@@ -1369,12 +1440,13 @@ def main():
                 label_meta   = label_meta,
                 metadata     = metadata,
             )
+        except PreprocessingError as exc:
+            st.error(f"⚠️ {exc}")
         except Exception as exc:
             st.error(f"❌ Terjadi kesalahan saat memproses audio:\n\n`{exc}`")
             with st.expander("Detail error"):
                 import traceback
                 st.code(traceback.format_exc(), language="python")
-
 
 # ===========================================================================
 # ENTRY POINT
